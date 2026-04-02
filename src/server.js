@@ -7,6 +7,7 @@ const authRoutes = require('./routes/auth');
 const ticketRoutes = require('./routes/tickets');
 const adminRoutes = require('./routes/admin');
 const helpTopicRoutes = require('./routes/helpTopics');
+const formOptionsRoutes = require('./routes/formOptions');
 
 const app = express();
 
@@ -29,13 +30,14 @@ app.use('/api/auth', authRoutes);
 app.use('/api/tickets', ticketRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/help-topics', helpTopicRoutes);
+app.use('/api/form-options', formOptionsRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
-    env: process.env.NODE_ENV 
+    env: process.env.NODE_ENV
   });
 });
 
@@ -57,6 +59,24 @@ app.use((req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+
+// Auto-create push_tokens table on startup
+const pool = require('./config/database');
+pool.query(`
+  CREATE TABLE IF NOT EXISTS push_tokens (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    token VARCHAR(255) NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_token (token),
+    INDEX idx_user_id (user_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+`).then(() => {
+  console.log('✓ push_tokens table ready');
+}).catch(err => {
+  console.warn('push_tokens table creation skipped:', err.message);
+});
 
 app.listen(PORT, () => {
   console.log(`

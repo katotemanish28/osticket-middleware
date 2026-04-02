@@ -385,3 +385,115 @@ exports.resetPassword = async (req, res) => {
     res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
+
+// Change password (logged-in user)
+exports.changePassword = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ success: false, message: 'Current password and new password are required' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: 'New password must be at least 6 characters' });
+    }
+
+    if (currentPassword === newPassword) {
+      return res.status(400).json({ success: false, message: 'New password must be different from current password' });
+    }
+
+    // Get current password hash
+    const [accountRows] = await pool.query(
+      `SELECT passwd FROM ost_user_account WHERE user_id = ? LIMIT 1`,
+      [userId]
+    );
+
+    if (accountRows.length === 0 || !accountRows[0].passwd) {
+      return res.status(404).json({ success: false, message: 'Account not found' });
+    }
+
+    // Verify current password
+    const passwordMatch = await bcrypt.compare(currentPassword, accountRows[0].passwd);
+    if (!passwordMatch) {
+      return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+    }
+
+    // Hash and update new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await pool.query(
+      `UPDATE ost_user_account SET passwd = ? WHERE user_id = ?`,
+      [hashedPassword, userId]
+    );
+
+    // Log to syslog
+    try {
+      const prefix = process.env.DB_PREFIX || 'ost_';
+      const [userRows] = await pool.query(`SELECT name FROM ${prefix}user WHERE id = ?`, [userId]);
+      const userName = (userRows.length > 0) ? userRows[0].name : 'Unknown';
+      await pool.query(
+        `INSERT INTO ${prefix}syslog (log_type, title, log, logger, ip_address, created, updated)
+         VALUES ('Warning', ?, ?, 'API', '', NOW(), NOW())`,
+        [
+          'Password Changed',
+          `User "${userName}" (ID: ${userId}) changed their password via the mobile API.`
+        ]
+      );
+    } catch (logErr) {
+      console.warn('Syslog insert failed (non-fatal):', logErr.message);
+    }
+
+    res.json({
+      success: true,
+      message: 'Password changed successfully'
+    });
+
+  } catch (error) {
+    console.error('Change password error:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// Register push notification token
+exports.registerPushToken = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'Push token is required' });
+    }
+
+    // Upsert: insert or update if token already exists
+    await pool.query(
+      `INSERT INTO push_tokens (user_id, token, created_at, updated_at)
+       VALUES (?, ?, NOW(), NOW())
+       ON DUPLICATE KEY UPDATE user_id = ?, updated_at = NOW()`,
+      [userId, token, userId]
+    );
+
+    res.json({ success: true, message: 'Push token registered' });
+  } catch (error) {
+    console.error('Register push token error:', error);
+    res.status(500).json({ success: false, message: 'Failed to register push token' });
+  }
+};
+
+// Unregister push notification token
+exports.unregisterPushToken = async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'Push token is required' });
+    }
+
+    await pool.query(`DELETE FROM push_tokens WHERE token = ?`, [token]);
+
+    res.json({ success: true, message: 'Push token unregistered' });
+  } catch (error) {
+    console.error('Unregister push token error:', error);
+    res.status(500).json({ success: false, message: 'Failed to unregister push token' });
+  }
+};

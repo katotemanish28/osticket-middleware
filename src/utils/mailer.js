@@ -49,4 +49,43 @@ const sendOtpEmail = async (toEmail, userName, otp) => {
   return transporter.sendMail(mailOptions);
 };
 
-module.exports = { sendOtpEmail };
+/**
+ * Send email notification for new ticket creation
+ * @param {string} toEmail - Recipient email
+ * @param {string} userName - Recipient name
+ * @param {string} ticketNumber - Generated ticket number
+ * @param {string} subject - Ticket subject
+ * @param {string} message - Ticket message snippet
+ */
+const sendTicketCreationEmail = async (toEmail, userName, ticketNumber, subject, message) => {
+  // Truncate message for email preview
+  const messagePreview = message.length > 150 ? message.substring(0, 150) + '...' : message;
+  
+  const mailOptions = {
+    from: process.env.SMTP_FROM || process.env.SMTP_USER,
+    to: toEmail,
+    subject: `Support Ticket Opened [#${ticketNumber}]`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+        <div style="background: #1976d2; color: white; padding: 20px; border-radius: 8px 8px 0 0; text-align: center;">
+          <h2 style="margin: 0;">🎫 Ticket Created</h2>
+        </div>
+        <div style="background: #fff; border: 1px solid #e0e0e0; border-top: none; padding: 24px; border-radius: 0 0 8px 8px;">
+          <p style="color: #333;">Hi <strong>${userName}</strong>,</p>
+          <p style="color: #555;">A request for support has been created and assigned ticket number <strong>#${ticketNumber}</strong>.</p>
+          <div style="background: #f5f5f5; border-left: 4px solid #1976d2; padding: 15px; margin: 20px 0;">
+            <h4 style="margin: 0 0 8px 0; color: #1976d2;">${subject}</h4>
+            <p style="color: #666; font-size: 14px; margin: 0; line-height: 1.5;">${messagePreview}</p>
+          </div>
+          <p style="color: #888; font-size: 13px;">Our team will get back to you as soon as possible.</p>
+          <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+          <p style="color: #aaa; font-size: 11px; text-align: center;">osTicket Mobile Support System</p>
+        </div>
+      </div>
+    `,
+  };
+
+  return transporter.sendMail(mailOptions);
+};
+
+module.exports = { sendOtpEmail, sendTicketCreationEmail };

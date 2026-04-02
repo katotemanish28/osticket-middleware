@@ -9,6 +9,9 @@ const adminTicketController = require('../controllers/adminTicketController');
 router.use(authMiddleware);
 router.use(adminMiddleware);
 
+// Agents
+router.get('/agents', adminTicketController.getAgents);
+
 // Tickets management
 router.get('/tickets', adminTicketController.listTickets);
 router.get('/tickets/:id', adminTicketController.getTicket);

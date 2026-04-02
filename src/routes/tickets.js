@@ -8,6 +8,7 @@ router.use(authMiddleware);
 router.get('/', ticketController.getUserTickets);
 router.post('/', ticketController.createTicket);
 router.get('/stats', ticketController.getStats);
+router.get('/search', ticketController.searchTickets);
 router.get('/:id', ticketController.getTicketDetail);
 router.put('/:id', ticketController.updateTicket);      // EDIT
 router.delete('/:id', ticketController.deleteTicket);   // DELETE

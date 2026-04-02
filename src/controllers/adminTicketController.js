@@ -1,4 +1,5 @@
 const pool = require('../config/database');
+const { sendPushToUser } = require('../utils/pushNotifications');
 
 // List all tickets (admin)
 exports.listTickets = async (req, res) => {
@@ -10,21 +11,23 @@ exports.listTickets = async (req, res) => {
       search = '',
     } = req.query;
 
+    const prefix = process.env.DB_PREFIX || 'ost_';
     const offset = (page - 1) * limit;
     let conditions = 'WHERE 1=1';
+
+    const params = [];
 
     // Filter by status (state)
     if (status !== 'all') {
       const [statuses] = await pool.query(
-        `SELECT id FROM ${process.env.DB_PREFIX}ticket_status WHERE state = ?`,
+        `SELECT id FROM ${prefix}ticket_status WHERE state = ?`,
         [status]
       );
       if (statuses.length > 0) {
-        conditions += ` AND t.status_id = ${statuses[0].id}`;
+        conditions += ' AND t.status_id = ?';
+        params.push(statuses[0].id);
       }
     }
-
-    const params = [];
 
     // Simple search over number, subject, user email
     if (search) {
@@ -47,12 +50,12 @@ exports.listTickets = async (req, res) => {
         p.priority as priority_name,
         u.name as user_name,
         ue.address as user_email
-      FROM ${process.env.DB_PREFIX}ticket t
-      LEFT JOIN ${process.env.DB_PREFIX}ticket__cdata c ON t.ticket_id = c.ticket_id
-      LEFT JOIN ${process.env.DB_PREFIX}ticket_status s ON t.status_id = s.id
-      LEFT JOIN ${process.env.DB_PREFIX}ticket_priority p ON c.priority = p.priority_id
-      LEFT JOIN ${process.env.DB_PREFIX}user u ON t.user_id = u.id
-      LEFT JOIN ${process.env.DB_PREFIX}user_email ue ON ue.user_id = u.id AND ue.id = t.user_email_id
+      FROM ${prefix}ticket t
+      LEFT JOIN ${prefix}ticket__cdata c ON t.ticket_id = c.ticket_id
+      LEFT JOIN ${prefix}ticket_status s ON t.status_id = s.id
+      LEFT JOIN ${prefix}ticket_priority p ON c.priority = p.priority_id
+      LEFT JOIN ${prefix}user u ON t.user_id = u.id
+      LEFT JOIN ${prefix}user_email ue ON ue.user_id = u.id AND ue.id = t.user_email_id
       ${conditions}
       ORDER BY t.created DESC
       LIMIT ? OFFSET ?`,
@@ -61,10 +64,10 @@ exports.listTickets = async (req, res) => {
 
     const [countResult] = await pool.query(
       `SELECT COUNT(*) as total
-       FROM ${process.env.DB_PREFIX}ticket t
-       LEFT JOIN ${process.env.DB_PREFIX}ticket__cdata c ON t.ticket_id = c.ticket_id
-       LEFT JOIN ${process.env.DB_PREFIX}user u ON t.user_id = u.id
-       LEFT JOIN ${process.env.DB_PREFIX}user_email ue ON ue.user_id = u.id AND ue.id = t.user_email_id
+       FROM ${prefix}ticket t
+       LEFT JOIN ${prefix}ticket__cdata c ON t.ticket_id = c.ticket_id
+       LEFT JOIN ${prefix}user u ON t.user_id = u.id
+       LEFT JOIN ${prefix}user_email ue ON ue.user_id = u.id AND ue.id = t.user_email_id
        ${conditions}`,
       params
     );
@@ -96,6 +99,8 @@ exports.getTicket = async (req, res) => {
       });
     }
 
+    const prefix = process.env.DB_PREFIX || 'ost_';
+
     const [tickets] = await pool.query(
       `SELECT 
         t.*,
@@ -107,14 +112,14 @@ exports.getTicket = async (req, res) => {
         s.state as status,
         c.priority as priority_id,
         p.priority as priority_name
-      FROM ${process.env.DB_PREFIX}ticket t
-      LEFT JOIN ${process.env.DB_PREFIX}ticket__cdata c ON t.ticket_id = c.ticket_id
-      LEFT JOIN ${process.env.DB_PREFIX}thread th ON th.object_id = t.ticket_id AND th.object_type = 'T'
-      LEFT JOIN ${process.env.DB_PREFIX}thread_entry e ON th.id = e.thread_id AND e.pid = 0
-      LEFT JOIN ${process.env.DB_PREFIX}user u ON t.user_id = u.id
-      LEFT JOIN ${process.env.DB_PREFIX}user_email ue ON ue.user_id = u.id AND ue.id = t.user_email_id
-      LEFT JOIN ${process.env.DB_PREFIX}ticket_status s ON t.status_id = s.id
-      LEFT JOIN ${process.env.DB_PREFIX}ticket_priority p ON c.priority = p.priority_id
+      FROM ${prefix}ticket t
+      LEFT JOIN ${prefix}ticket__cdata c ON t.ticket_id = c.ticket_id
+      LEFT JOIN ${prefix}thread th ON th.object_id = t.ticket_id AND th.object_type = 'T'
+      LEFT JOIN ${prefix}thread_entry e ON th.id = e.thread_id AND e.pid = 0
+      LEFT JOIN ${prefix}user u ON t.user_id = u.id
+      LEFT JOIN ${prefix}user_email ue ON ue.user_id = u.id AND ue.id = t.user_email_id
+      LEFT JOIN ${prefix}ticket_status s ON t.status_id = s.id
+      LEFT JOIN ${prefix}ticket_priority p ON c.priority = p.priority_id
       WHERE t.ticket_id = ?`,
       [ticketId]
     );
@@ -153,11 +158,12 @@ exports.updateStatus = async (req, res) => {
       });
     }
 
+    const prefix = process.env.DB_PREFIX || 'ost_';
     let newStatusId = statusId;
 
     if (!newStatusId && status) {
       const [rows] = await pool.query(
-        `SELECT id FROM ${process.env.DB_PREFIX}ticket_status WHERE state = ? OR name = ? LIMIT 1`,
+        `SELECT id FROM ${prefix}ticket_status WHERE state = ? OR name = ? LIMIT 1`,
         [status, status]
       );
       if (rows.length === 0) {
@@ -177,7 +183,7 @@ exports.updateStatus = async (req, res) => {
     }
 
     await pool.query(
-      `UPDATE ${process.env.DB_PREFIX}ticket
+      `UPDATE ${prefix}ticket
        SET status_id = ?, updated = NOW()
        WHERE ticket_id = ?`,
       [newStatusId, ticketId]
@@ -188,6 +194,32 @@ exports.updateStatus = async (req, res) => {
       message: 'Status updated successfully',
       data: { ticket_id: ticketId, status_id: newStatusId },
     });
+
+    // Send push notification to ticket owner (fire-and-forget)
+    try {
+      const [ticketRows] = await pool.query(
+        `SELECT t.user_id, c.subject FROM ${prefix}ticket t
+         LEFT JOIN ${prefix}ticket__cdata c ON c.ticket_id = t.ticket_id
+         WHERE t.ticket_id = ? LIMIT 1`,
+        [ticketId]
+      );
+      if (ticketRows.length > 0) {
+        const [statusRows] = await pool.query(
+          `SELECT name FROM ${prefix}ticket_status WHERE id = ? LIMIT 1`,
+          [newStatusId]
+        );
+        const statusName = statusRows.length > 0 ? statusRows[0].name : 'Updated';
+        const subject = ticketRows[0].subject || `Ticket #${ticketId}`;
+        sendPushToUser(
+          ticketRows[0].user_id,
+          'Ticket Status Changed',
+          `"${subject}" is now ${statusName}`,
+          { ticketId: String(ticketId), type: 'status_change' }
+        );
+      }
+    } catch (pushErr) {
+      console.warn('Status change push failed (non-fatal):', pushErr.message);
+    }
   } catch (error) {
     console.error('Admin update status error:', error);
     res.status(500).json({
@@ -211,11 +243,12 @@ exports.updatePriority = async (req, res) => {
       });
     }
 
+    const prefix = process.env.DB_PREFIX || 'ost_';
     let newPriorityId = priorityId;
 
     if (!newPriorityId && priority) {
       const [rows] = await pool.query(
-        `SELECT priority_id FROM ${process.env.DB_PREFIX}ticket_priority WHERE priority = ? LIMIT 1`,
+        `SELECT priority_id FROM ${prefix}ticket_priority WHERE priority = ? LIMIT 1`,
         [priority]
       );
       if (rows.length === 0) {
@@ -235,14 +268,14 @@ exports.updatePriority = async (req, res) => {
     }
 
     await pool.query(
-      `UPDATE ${process.env.DB_PREFIX}ticket__cdata
+      `UPDATE ${prefix}ticket__cdata
        SET priority = ?
        WHERE ticket_id = ?`,
       [newPriorityId, ticketId]
     );
 
     await pool.query(
-      `UPDATE ${process.env.DB_PREFIX}ticket
+      `UPDATE ${prefix}ticket
        SET updated = NOW()
        WHERE ticket_id = ?`,
       [ticketId]
@@ -416,11 +449,57 @@ exports.replyToTicket = async (req, res) => {
         created: new Date().toISOString(),
       },
     });
+
+    // Send push notification to ticket owner (fire-and-forget)
+    try {
+      const [ticketRows] = await pool.query(
+        `SELECT t.user_id, c.subject FROM ${prefix}ticket t
+         LEFT JOIN ${prefix}ticket__cdata c ON c.ticket_id = t.ticket_id
+         WHERE t.ticket_id = ? LIMIT 1`,
+        [ticketId]
+      );
+      if (ticketRows.length > 0) {
+        sendPushToUser(
+          ticketRows[0].user_id,
+          'New Reply from Support',
+          `Admin replied to "${ticketRows[0].subject || 'your ticket'}"`,
+          { ticketId: String(ticketId), type: 'admin_reply' }
+        );
+      }
+    } catch (pushErr) {
+      console.warn('Admin reply push failed (non-fatal):', pushErr.message);
+    }
   } catch (error) {
     console.error('Admin reply to ticket error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to send reply',
+    });
+  }
+};
+
+// Get all active agents (admin)
+exports.getAgents = async (req, res) => {
+  try {
+    const prefix = process.env.DB_PREFIX || 'ost_';
+    
+    // Fetch active staff members
+    const [agents] = await pool.query(
+      `SELECT staff_id as id, CONCAT(firstname, ' ', lastname) as name 
+       FROM ${prefix}staff 
+       WHERE isactive = 1 
+       ORDER BY firstname ASC`
+    );
+
+    res.json({
+      success: true,
+      data: agents,
+    });
+  } catch (error) {
+    console.error('Admin get agents error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch agents',
     });
   }
 };

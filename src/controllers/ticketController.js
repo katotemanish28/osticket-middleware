@@ -1,10 +1,21 @@
 const pool = require('../config/database');
+const { sendPushToAdmins } = require('../utils/pushNotifications');
+const { sendTicketCreationEmail } = require('../utils/mailer');
 
 // Create ticket
 exports.createTicket = async (req, res) => {
   try {
     const userId = req.user.userId;
-    const { subject, message, priority = 2, topicId = 1, deptId = 1 } = req.body;
+    console.log('--- NEW TICKET PAYLOAD ---');
+    console.log(req.body);
+    console.log('--------------------------');
+    const { subject, message, priority = 2, topicId = 1, deptId = 1, ticketSource = 'API', slaPlanId = 0, dueDate = null, assignTo = 0 } = req.body;
+
+    const parsedDeptId = parseInt(deptId, 10) || 1;
+    const parsedTopicId = parseInt(topicId, 10) || 1;
+    const parsedSlaPlanId = parseInt(slaPlanId, 10) || 0;
+    const parsedAssignTo = parseInt(assignTo, 10) || 0;
+    const parsedPriority = parseInt(priority, 10) || 2;
 
     if (!subject || !message) {
       return res.status(400).json({
@@ -16,7 +27,7 @@ exports.createTicket = async (req, res) => {
     const prefix = process.env.DB_PREFIX || 'ost_';
 
     const [[userEmailRow]] = await pool.query(
-      `SELECT id FROM ${prefix}user_email WHERE user_id = ? LIMIT 1`,
+      `SELECT id, address FROM ${prefix}user_email WHERE user_id = ? LIMIT 1`,
       [userId]
     );
     if (!userEmailRow) {
@@ -26,6 +37,7 @@ exports.createTicket = async (req, res) => {
       });
     }
     const userEmailId = userEmailRow.id;
+    const userEmailAddress = userEmailRow.address;
 
     const ticketNumber = String(Math.floor(100000 + Math.random() * 900000));
 
@@ -33,15 +45,15 @@ exports.createTicket = async (req, res) => {
       `INSERT INTO ${prefix}ticket (
         number, user_id, user_email_id, status_id, dept_id, sla_id, topic_id,
         staff_id, team_id, email_id, lock_id, flags, sort, ip_address, source,
-        source_extra, isoverdue, isanswered, created, updated
-      ) VALUES (?, ?, ?, 1, ?, 0, ?, 0, 0, 0, 0, 0, 0, '', 'API', '', 0, 0, NOW(), NOW())`,
-      [ticketNumber, userId, userEmailId, deptId, topicId]
+        source_extra, isoverdue, isanswered, created, updated, duedate
+      ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, 0, 0, 0, 0, 0, '', ?, '', 0, 0, NOW(), NOW(), ?)`,
+      [ticketNumber, userId, userEmailId, parsedDeptId, parsedSlaPlanId, parsedTopicId, parsedAssignTo, ticketSource || 'API', dueDate || null]
     );
     const ticketId = ticketInsert.insertId;
 
     await pool.query(
       `INSERT INTO ${prefix}ticket__cdata (ticket_id, subject, priority) VALUES (?, ?, ?)`,
-      [ticketId, subject, priority]
+      [ticketId, subject, parsedPriority]
     );
 
     const [threadInsert] = await pool.query(
@@ -69,8 +81,18 @@ exports.createTicket = async (req, res) => {
           `Ticket "${subject}" (ID: ${ticketId}, #${ticketNumber}) was created by user ID ${userId} via the mobile API.`
         ]
       );
-    } catch (logErr) {
-      console.warn('Syslog insert failed (non-fatal):', logErr.message);
+    } catch (logError) {
+      console.error('Failed to log to syslog:', logError);
+    }
+
+    // Try to send email notification to the user but don't fail the request if it fails
+    try {
+      if (userEmailAddress) {
+        await sendTicketCreationEmail(userEmailAddress, posterName, ticketNumber, subject, message);
+        console.log(`Ticket creation email sent to ${userEmailAddress} for ticket #${ticketNumber}`);
+      }
+    } catch (emailError) {
+      console.error('Failed to send ticket creation email:', emailError);
     }
 
     res.status(201).json({
@@ -98,16 +120,19 @@ exports.getUserTickets = async (req, res) => {
     const userId = req.user.userId;
     const { status = 'open', page = 1, limit = 20 } = req.query;
 
+    const prefix = process.env.DB_PREFIX || 'ost_';
     const offset = (page - 1) * limit;
     let statusCondition = '';
+    const queryParams = [userId];
 
     if (status !== 'all') {
       const [statuses] = await pool.query(
-        `SELECT id FROM ${process.env.DB_PREFIX}ticket_status WHERE state = ?`,
+        `SELECT id FROM ${prefix}ticket_status WHERE state = ?`,
         [status]
       );
       if (statuses.length > 0) {
-        statusCondition = `AND t.status_id = ${statuses[0].id}`;
+        statusCondition = 'AND t.status_id = ?';
+        queryParams.push(statuses[0].id);
       }
     }
 
@@ -123,21 +148,21 @@ exports.getUserTickets = async (req, res) => {
         s.name as status_name,
         s.state as status_state,
         p.priority as priority_name
-      FROM ${process.env.DB_PREFIX}ticket t
-      LEFT JOIN ${process.env.DB_PREFIX}ticket__cdata c ON t.ticket_id = c.ticket_id
-      LEFT JOIN ${process.env.DB_PREFIX}ticket_status s ON t.status_id = s.id
-      LEFT JOIN ${process.env.DB_PREFIX}ticket_priority p ON c.priority = p.priority_id
+      FROM ${prefix}ticket t
+      LEFT JOIN ${prefix}ticket__cdata c ON t.ticket_id = c.ticket_id
+      LEFT JOIN ${prefix}ticket_status s ON t.status_id = s.id
+      LEFT JOIN ${prefix}ticket_priority p ON c.priority = p.priority_id
       WHERE t.user_id = ? ${statusCondition}
       ORDER BY t.created DESC
       LIMIT ? OFFSET ?`,
-      [userId, parseInt(limit), offset]
+      [...queryParams, parseInt(limit), offset]
     );
 
     const [countResult] = await pool.query(
       `SELECT COUNT(*) as total 
-       FROM ${process.env.DB_PREFIX}ticket t
+       FROM ${prefix}ticket t
        WHERE t.user_id = ? ${statusCondition}`,
-      [userId]
+      queryParams
     );
 
     res.json({
@@ -169,6 +194,8 @@ exports.getTicketDetail = async (req, res) => {
       });
     }
 
+    const prefix = process.env.DB_PREFIX || 'ost_';
+
     const [tickets] = await pool.query(
       `SELECT 
         t.*,
@@ -179,15 +206,21 @@ exports.getTicketDetail = async (req, res) => {
         s.name as status_name,
         s.state as status,
         c.priority as priority_id,
-        p.priority as priority_name
-      FROM ${process.env.DB_PREFIX}ticket t
-      LEFT JOIN ${process.env.DB_PREFIX}ticket__cdata c ON t.ticket_id = c.ticket_id
-      LEFT JOIN ${process.env.DB_PREFIX}thread th ON th.object_id = t.ticket_id AND th.object_type = 'T'
-      LEFT JOIN ${process.env.DB_PREFIX}thread_entry e ON th.id = e.thread_id AND e.pid = 0
-      LEFT JOIN ${process.env.DB_PREFIX}user u ON t.user_id = u.id
-      LEFT JOIN ${process.env.DB_PREFIX}user_email ue ON ue.user_id = u.id AND ue.id = t.user_email_id
-      LEFT JOIN ${process.env.DB_PREFIX}ticket_status s ON t.status_id = s.id
-      LEFT JOIN ${process.env.DB_PREFIX}ticket_priority p ON c.priority = p.priority_id
+        p.priority as priority_name,
+        ht.topic as help_topic,
+        d.name as department_name,
+        sla.name as sla_name
+      FROM ${prefix}ticket t
+      LEFT JOIN ${prefix}ticket__cdata c ON t.ticket_id = c.ticket_id
+      LEFT JOIN ${prefix}thread th ON th.object_id = t.ticket_id AND th.object_type = 'T'
+      LEFT JOIN ${prefix}thread_entry e ON th.id = e.thread_id AND e.pid = 0
+      LEFT JOIN ${prefix}user u ON t.user_id = u.id
+      LEFT JOIN ${prefix}user_email ue ON ue.user_id = u.id AND ue.id = t.user_email_id
+      LEFT JOIN ${prefix}ticket_status s ON t.status_id = s.id
+      LEFT JOIN ${prefix}ticket_priority p ON c.priority = p.priority_id
+      LEFT JOIN ${prefix}help_topic ht ON t.topic_id = ht.topic_id
+      LEFT JOIN ${prefix}department d ON t.dept_id = d.id
+      LEFT JOIN ${prefix}sla sla ON t.sla_id = sla.id
       WHERE t.ticket_id = ? AND t.user_id = ?`,
       [ticketId, userId]
     );
@@ -220,9 +253,11 @@ exports.updateTicket = async (req, res) => {
     const ticketId = req.params.id;
     const { subject, priority } = req.body;
 
+    const prefix = process.env.DB_PREFIX || 'ost_';
+
     // Verify ownership
     const [tickets] = await pool.query(
-      `SELECT ticket_id FROM ${process.env.DB_PREFIX}ticket 
+      `SELECT ticket_id FROM ${prefix}ticket 
        WHERE ticket_id = ? AND user_id = ?`,
       [ticketId, userId]
     );
@@ -237,7 +272,7 @@ exports.updateTicket = async (req, res) => {
     // Update priority in ticket__cdata
     if (priority !== undefined) {
       await pool.query(
-        `UPDATE ${process.env.DB_PREFIX}ticket__cdata 
+        `UPDATE ${prefix}ticket__cdata 
          SET priority = ? 
          WHERE ticket_id = ?`,
         [priority, ticketId]
@@ -247,7 +282,7 @@ exports.updateTicket = async (req, res) => {
     // Update subject in ticket__cdata
     if (subject !== undefined) {
       await pool.query(
-        `UPDATE ${process.env.DB_PREFIX}ticket__cdata 
+        `UPDATE ${prefix}ticket__cdata 
          SET subject = ? 
          WHERE ticket_id = ?`,
         [subject, ticketId]
@@ -257,7 +292,7 @@ exports.updateTicket = async (req, res) => {
     // Update ticket updated timestamp if any changes were made
     if (subject !== undefined || priority !== undefined) {
       await pool.query(
-        `UPDATE ${process.env.DB_PREFIX}ticket 
+        `UPDATE ${prefix}ticket 
          SET updated = NOW() 
          WHERE ticket_id = ?`,
         [ticketId]
@@ -285,9 +320,11 @@ exports.deleteTicket = async (req, res) => {
     const userId = req.user.userId;
     const ticketId = req.params.id;
 
+    const prefix = process.env.DB_PREFIX || 'ost_';
+
     // Verify ownership
     const [tickets] = await pool.query(
-      `SELECT ticket_id FROM ${process.env.DB_PREFIX}ticket 
+      `SELECT ticket_id FROM ${prefix}ticket 
        WHERE ticket_id = ? AND user_id = ?`,
       [ticketId, userId]
     );
@@ -301,8 +338,8 @@ exports.deleteTicket = async (req, res) => {
 
     // Fetch ticket number before deletion for logging
     const [[ticketMeta]] = await pool.query(
-      `SELECT t.number, c.subject FROM ${process.env.DB_PREFIX}ticket t
-       LEFT JOIN ${process.env.DB_PREFIX}ticket__cdata c ON c.ticket_id = t.ticket_id
+      `SELECT t.number, c.subject FROM ${prefix}ticket t
+       LEFT JOIN ${prefix}ticket__cdata c ON c.ticket_id = t.ticket_id
        WHERE t.ticket_id = ? LIMIT 1`,
       [ticketId]
     );
@@ -311,14 +348,14 @@ exports.deleteTicket = async (req, res) => {
 
     // Delete ticket (this will cascade to related tables if FK constraints are set)
     await pool.query(
-      `DELETE FROM ${process.env.DB_PREFIX}ticket WHERE ticket_id = ?`,
+      `DELETE FROM ${prefix}ticket WHERE ticket_id = ?`,
       [ticketId]
     );
 
     // Write deletion to osTicket system log
     try {
       await pool.query(
-        `INSERT INTO ${process.env.DB_PREFIX}syslog (log_type, title, log, logger, ip_address, created, updated)
+        `INSERT INTO ${prefix}syslog (log_type, title, log, logger, ip_address, created, updated)
          VALUES ('Warning', ?, ?, 'API', '', NOW(), NOW())`,
         [
           `Delete Ticket`,
@@ -556,11 +593,105 @@ exports.replyToTicket = async (req, res) => {
       }
     });
 
+    // Send push notification to admins (fire-and-forget)
+    const [ticketMeta] = await pool.query(
+      `SELECT c.subject FROM ${prefix}ticket__cdata c WHERE c.ticket_id = ? LIMIT 1`,
+      [ticketId]
+    );
+    const subject = ticketMeta.length > 0 ? ticketMeta[0].subject : `Ticket #${ticketId}`;
+    sendPushToAdmins(
+      'New Reply from User',
+      `${posterName} replied to "${subject}"`,
+      { ticketId: String(ticketId), type: 'user_reply' }
+    );
+
   } catch (error) {
     console.error('Reply to ticket error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to send reply'
+    });
+  }
+};
+
+// Search tickets
+exports.searchTickets = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { q = '', status = 'all', page = 1, limit = 20 } = req.query;
+
+    const prefix = process.env.DB_PREFIX || 'ost_';
+    const offset = (page - 1) * limit;
+    const params = [userId];
+    let conditions = 'WHERE t.user_id = ?';
+
+    // Status filter
+    if (status !== 'all') {
+      const [statuses] = await pool.query(
+        `SELECT id FROM ${prefix}ticket_status WHERE state = ?`,
+        [status]
+      );
+      if (statuses.length > 0) {
+        conditions += ' AND t.status_id = ?';
+        params.push(statuses[0].id);
+      }
+    }
+
+    // Search filter
+    if (q.trim()) {
+      conditions += ' AND (t.number LIKE ? OR c.subject LIKE ? OR e.body LIKE ?)';
+      const term = `%${q.trim()}%`;
+      params.push(term, term, term);
+    }
+
+    const [tickets] = await pool.query(
+      `SELECT
+        t.ticket_id,
+        t.number,
+        t.status_id,
+        c.priority as priority_id,
+        t.created,
+        t.updated,
+        c.subject,
+        s.name as status_name,
+        s.state as status_state,
+        p.priority as priority_name
+      FROM ${prefix}ticket t
+      LEFT JOIN ${prefix}ticket__cdata c ON t.ticket_id = c.ticket_id
+      LEFT JOIN ${prefix}ticket_status s ON t.status_id = s.id
+      LEFT JOIN ${prefix}ticket_priority p ON c.priority = p.priority_id
+      LEFT JOIN ${prefix}thread th ON th.object_id = t.ticket_id AND th.object_type = 'T'
+      LEFT JOIN ${prefix}thread_entry e ON th.id = e.thread_id
+      ${conditions}
+      GROUP BY t.ticket_id
+      ORDER BY t.created DESC
+      LIMIT ? OFFSET ?`,
+      [...params, parseInt(limit), offset]
+    );
+
+    const countParams = [...params];
+    const [countResult] = await pool.query(
+      `SELECT COUNT(DISTINCT t.ticket_id) as total
+       FROM ${prefix}ticket t
+       LEFT JOIN ${prefix}ticket__cdata c ON t.ticket_id = c.ticket_id
+       LEFT JOIN ${prefix}thread th ON th.object_id = t.ticket_id AND th.object_type = 'T'
+       LEFT JOIN ${prefix}thread_entry e ON th.id = e.thread_id AND e.pid = 0
+       ${conditions}`,
+      countParams
+    );
+
+    res.json({
+      success: true,
+      tickets,
+      total: countResult[0].total,
+      page: parseInt(page),
+    });
+
+  } catch (error) {
+    console.error('Search tickets error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to search tickets'
     });
   }
 };

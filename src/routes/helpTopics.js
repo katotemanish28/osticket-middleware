@@ -1,21 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../middleware/auth');
+const pool = require('../config/database');
 
 router.use(authMiddleware);
 
 // Get help topics (categories)
 router.get('/', async (req, res) => {
   try {
-    // Return default help topics - you can customize this based on your osTicket setup
+    const [rows] = await pool.query('SELECT topic_id as id, topic FROM ost_help_topic');
     res.json({
       success: true,
-      data: [
-        { id: 1, topic: 'General Inquiry', ispublic: 1 },
-        { id: 2, topic: 'Technical Support', ispublic: 1 },
-        { id: 3, topic: 'Billing', ispublic: 1 },
-        { id: 4, topic: 'Feature Request', ispublic: 1 },
-      ]
+      data: rows
     });
   } catch (error) {
     console.error('Get help topics error:', error);
