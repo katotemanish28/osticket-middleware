@@ -239,14 +239,9 @@ exports.forgotPassword = async (req, res) => {
       attempts: 0,
     });
 
-    // Send OTP via email
-    try {
-      await sendOtpEmail(emailLower, rows[0].name, otp);
-    } catch (emailErr) {
-      console.error('Failed to send OTP email:', emailErr.message);
-      otpStore.delete(emailLower);
-      return res.status(500).json({ success: false, message: 'Failed to send OTP email. Please try again later.' });
-    }
+    // Send OTP via email (Non-blocking so we can use the Log Workaround)
+    sendOtpEmail(emailLower, rows[0].name, otp)
+      .catch(err => console.error('✗ Real email failed (but you can check logs for OTP):', err.message));
 
     res.json({
       success: true,

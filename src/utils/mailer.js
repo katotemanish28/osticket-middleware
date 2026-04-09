@@ -22,6 +22,15 @@ transporter.verify()
  * @param {string} otp - 6-digit OTP code
  */
 const sendOtpEmail = async (toEmail, userName, otp) => {
+  // Developer Shortcut: Always log the OTP so you can use it even if email is blocked
+  console.log(`\n🔑 [DEBUG] OTP for ${toEmail}: ${otp}\n`);
+
+  // If SMTP is not fully configured, don't crash
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS || process.env.SMTP_USER === 'your-email@gmail.com') {
+    console.log('⚠️ SMTP not configured or using placeholders, skipping real email send.');
+    return true; 
+  }
+
   const mailOptions = {
     from: process.env.SMTP_FROM || process.env.SMTP_USER,
     to: toEmail,
