@@ -1,4 +1,5 @@
 const pool = require('../config/database');
+const bcrypt = require('bcrypt');
 const { sendPushToUser } = require('../utils/pushNotifications');
 
 // List all tickets (admin)
@@ -500,6 +501,100 @@ exports.getAgents = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to fetch agents',
+    });
+  }
+};
+// Create a new agent (admin)
+exports.createAgent = async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Name, email and password are required',
+      });
+    }
+
+    const prefix = process.env.DB_PREFIX || 'ost_';
+    const emailLower = email.toLowerCase().trim();
+    
+    // Generate username from email if not provided
+    const username = emailLower.split('@')[0];
+
+    // Split Full Name into First and Last
+    const nameParts = name.trim().split(/\s+/);
+    const firstname = nameParts[0];
+    const lastname = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '.';
+
+    // Check for existing agent
+    const [existing] = await pool.query(
+      `SELECT staff_id FROM ${prefix}staff WHERE email = ? OR username = ?`,
+      [emailLower, username]
+    );
+
+    if (existing.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'Agent with this email or username already exists',
+      });
+    }
+
+    // Hash password (bcrypt)
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const now = new Date();
+
+    const [result] = await pool.query(
+      `INSERT INTO ${prefix}staff 
+        (dept_id, role_id, username, firstname, lastname, passwd, email, 
+         isactive, isadmin, isvisible, created, updated, passwdreset) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, 1, ?, ?, ?)`,
+      [
+        1, // Default Dept: Support
+        1, // Default Role: Limited Access (adjust as needed)
+        username,
+        firstname,
+        lastname,
+        hashedPassword,
+        emailLower,
+        now,
+        now,
+        now
+      ]
+    );
+
+    // Get the new agent's ID
+    const agentId = result.insertId;
+
+    // Log the creation
+    try {
+      await pool.query(
+        `INSERT INTO ${prefix}syslog (log_type, title, log, logger, ip_address, created, updated)
+         VALUES ('Warning', ?, ?, 'API', ?, NOW(), NOW())`,
+        [
+          'Agent Created',
+          `New staff account created for "${name}" (ID: ${agentId}, email: ${emailLower}) via the mobile API.`,
+          req.ip || ''
+        ]
+      );
+    } catch (logErr) {
+      console.warn('Agent creation syslog failed:', logErr.message);
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Agent created successfully',
+      data: {
+        id: agentId,
+        name: `${firstname} ${lastname}`.trim(),
+        email: emailLower,
+      },
+    });
+  } catch (error) {
+    console.error('Create agent error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create agent',
     });
   }
 };

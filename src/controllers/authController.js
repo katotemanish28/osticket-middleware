@@ -15,10 +15,11 @@ exports.login = async (req, res) => {
 
     const emailLower = email.toLowerCase().trim();
 
+    const prefix = process.env.DB_PREFIX || 'ost_';
     const [rows] = await pool.query(
       `SELECT u.*, e.address AS email
-       FROM ost_user u
-       JOIN ost_user_email e ON e.user_id = u.id
+       FROM ${prefix}user u
+       JOIN ${prefix}user_email e ON e.user_id = u.id
        WHERE e.address = ?`,
       [emailLower]
     );
@@ -32,9 +33,9 @@ exports.login = async (req, res) => {
 
     const user = rows[0];
 
-    // Verify password against bcrypt hash in ost_user_account
+    // Verify password against bcrypt hash in user_account
     const [accountRows] = await pool.query(
-      `SELECT passwd FROM ost_user_account WHERE user_id = ? LIMIT 1`,
+      `SELECT passwd FROM ${prefix}user_account WHERE user_id = ? LIMIT 1`,
       [user.id]
     );
 
@@ -96,7 +97,7 @@ exports.login = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Login error:', error);
+    console.error(`❌ Login error for ${req.body.email || 'unknown'}:`, error);
     res.status(500).json({
       success: false,
       message: 'Internal server error'
@@ -124,9 +125,9 @@ exports.register = async (req, res) => {
 
     const emailLower = email.toLowerCase().trim();
 
-    // Check if email already registered
+    const prefix = process.env.DB_PREFIX || 'ost_';
     const [existing] = await pool.query(
-      `SELECT id FROM ost_user_email WHERE address = ? LIMIT 1`,
+      `SELECT id FROM ${prefix}user_email WHERE address = ? LIMIT 1`,
       [emailLower]
     );
     if (existing.length > 0) {
@@ -135,27 +136,36 @@ exports.register = async (req, res) => {
 
     const now = new Date();
 
-    // Insert into ost_user
+    // Step 1: Insert into ost_user with temporary defaults for NOT NULL fields
     const [userResult] = await pool.query(
-      `INSERT INTO ost_user (name, created, updated) VALUES (?, ?, ?)`,
+      `INSERT INTO ${prefix}user (org_id, default_email_id, status, name, created, updated) 
+       VALUES (0, 0, 0, ?, ?, ?)`,
       [name.trim(), now, now]
     );
     const userId = userResult.insertId;
 
-    // Insert into ost_user_email
-    await pool.query(
-      `INSERT INTO ost_user_email (user_id, flags, address) VALUES (?, 0, ?)`,
+    // Step 2: Insert into ost_user_email
+    const [emailResult] = await pool.query(
+      `INSERT INTO ${prefix}user_email (user_id, flags, address) VALUES (?, 0, ?)`,
       [userId, emailLower]
     );
+    const emailId = emailResult.insertId;
 
-    // Hash password and store in ost_user_account
+    // Step 3: Update ost_user with the real default_email_id
+    await pool.query(
+      `UPDATE ${prefix}user SET default_email_id = ? WHERE id = ?`,
+      [emailId, userId]
+    );
+
+    // Step 4: Hash password and store in ost_user_account
     const hashedPassword = await bcrypt.hash(password, 10);
     await pool.query(
-      `INSERT INTO ost_user_account (user_id, status, timezone, passwd, backend, extra) VALUES (?, 0, '', ?, 'core', '')`,
+      `INSERT INTO ${prefix}user_account (user_id, status, timezone, passwd, backend, extra) 
+       VALUES (?, 0, 'UTC', ?, 'core', '')`,
       [userId, hashedPassword]
     );
 
-    // Determine role
+    // Step 5: Determine role and return success
     const adminEmails = (process.env.ADMIN_EMAILS || '')
       .split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
     const role = adminEmails.includes(emailLower) ? 'admin' : 'user';
@@ -166,20 +176,7 @@ exports.register = async (req, res) => {
       { expiresIn: '30d' }
     );
 
-    // Write signup to osTicket system log
-    try {
-      const prefix = process.env.DB_PREFIX || 'ost_';
-      await pool.query(
-        `INSERT INTO ${prefix}syslog (log_type, title, log, logger, ip_address, created, updated)
-         VALUES ('Warning', ?, ?, 'API', '', NOW(), NOW())`,
-        [
-          `Sign Up`,
-          `New account created for "${name.trim()}" (ID: ${userId}, email: ${emailLower}, role: ${role}) via the mobile API.`
-        ]
-      );
-    } catch (logErr) {
-      console.warn('Syslog insert failed (non-fatal):', logErr.message);
-    }
+    console.log(`✓ Registration successful for: ${emailLower} (ID: ${userId})`);
 
     res.status(201).json({
       success: true,
@@ -188,7 +185,7 @@ exports.register = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Register error:', error);
+    console.error(`❌ Register error for ${req.body.email || 'unknown'}:`, error);
     res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };

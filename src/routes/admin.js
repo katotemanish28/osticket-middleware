@@ -11,6 +11,7 @@ router.use(adminMiddleware);
 
 // Agents
 router.get('/agents', adminTicketController.getAgents);
+router.post('/agents', adminTicketController.createAgent);
 
 // Tickets management
 router.get('/tickets', adminTicketController.listTickets);
