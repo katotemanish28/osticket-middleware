@@ -1,7 +1,7 @@
 services:
   - type: web
     name: osticket-middleware
-    env: node
+    runtime: node
     plan: free
     buildCommand: npm install
     startCommand: npm start
@@ -21,4 +21,6 @@ services:
       - key: DB_NAME
         sync: false
       - key: DB_PORT
-        value: 3306
+        value: 23979
+      - key: DB_SSL
+        value: "true"
