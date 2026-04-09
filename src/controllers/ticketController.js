@@ -85,14 +85,11 @@ exports.createTicket = async (req, res) => {
       console.error('Failed to log to syslog:', logError);
     }
 
-    // Try to send email notification to the user but don't fail the request if it fails
-    try {
-      if (userEmailAddress) {
-        await sendTicketCreationEmail(userEmailAddress, posterName, ticketNumber, subject, message);
-        console.log(`Ticket creation email sent to ${userEmailAddress} for ticket #${ticketNumber}`);
-      }
-    } catch (emailError) {
-      console.error('Failed to send ticket creation email:', emailError);
+    // Trigger email notification to the user (non-blocking background task)
+    if (userEmailAddress) {
+      sendTicketCreationEmail(userEmailAddress, posterName, ticketNumber, subject, message)
+        .then(() => console.log(`✓ Ticket creation email sent to ${userEmailAddress} for ticket #${ticketNumber}`))
+        .catch(emailError => console.error('✗ Failed to send ticket creation email (non-blocking):', emailError.message));
     }
 
     res.status(201).json({
